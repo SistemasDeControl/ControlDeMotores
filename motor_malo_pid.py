@@ -3,7 +3,8 @@
 Motor Malo - Controlador PID compensado (ISAI)
 Implementa un controlador PID sobre el modelo de primer orden.
 """
-
+from pid_controller import PIDController
+from motor_malo_model import motor_malo_step
 import os
 import sys
 import math

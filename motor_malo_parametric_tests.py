@@ -7,7 +7,7 @@ Genera:
  - ./outputs/motor_malo_parametric_test/resultados_parametricos.csv
  - ./outputs/motor_malo_parametric_test/grafico_resumen.png
 """
-
+from motor_malo_model import motor_malo_step
 import os
 import sys
 import random
@@ -54,7 +54,7 @@ def make_first_order_system(K: float, tau: float):
 
 def simulate_forced_response(sys, T, u):
     if USE_CONTROL:
-        t_out, y_out, _ = ctl.forced_response(sys, T=T, U=u)
+        t_out, y_out = ctl.forced_response(sys, T=T, U=u)
     else:
         t_out, y_out, _ = signal.lsim(sys, U=u, T=T)
     return t_out, y_out
