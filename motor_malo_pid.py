@@ -145,6 +145,31 @@ def compute_metrics(t, y, ref):
             "t_settle": float(t_settle) if not np.isnan(t_settle) else np.nan,
             "ess": float(ess) if not np.isnan(ess) else np.nan}
 
+def test_pid_stability():
+    K = DEFAULT_K
+    tau = DEFAULT_TAU
+    Ts = 0.02
+    ref = DEFAULT_TARGET_RPM
+    pid = PIDController(DEFAULT_KP, DEFAULT_KI, DEFAULT_KD, Ts)
+    rpm = 0
+    rpm_hist = []
+    u_hist = []
+    for i in range(int(DEFAULT_SIM_TIME / Ts)):
+        t = i * Ts
+        # Falla simulada entre 4 y 6 segundos
+        falla = 4 < t < 6
+        ruido_std = 5.0 if not falla else 25.0
+        rpm = motor_malo_step(rpm, ref, K, tau, Ts, ruido_std=ruido_std, falla=falla)
+        u = pid.calcular_salida(ref, rpm)
+        rpm_hist.append(rpm)
+        u_hist.append(u)
+        # Checa saturación
+        if abs(u) >= pid.limite_u:
+            print(f"Saturación del PID en t={t:.2f}s")
+        # Checa estabilidad
+        if abs(rpm) > 2*ref:
+            print(f"Inestabilidad detectada en t={t:.2f}s")
+    return rpm_hist, u_hist
 
 # -----------------------
 # Main GUI application

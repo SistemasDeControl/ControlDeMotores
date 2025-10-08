@@ -64,6 +64,14 @@ FONT = "DejaVu Sans"
 # -----------------------
 # Control/model helpers
 # -----------------------
+def motor_malo_step(rpm_prev, u, K, tau, Ts, ruido_std=5.0, falla=False):
+    rpm = rpm_prev + (Ts/tau) * (-rpm_prev + K * u)
+    # Añadir ruido gaussiano
+    rpm += np.random.normal(0, ruido_std)
+    # Simular falla (caída de potencia)
+    if falla:
+        rpm *= 0.5  # 50% de potencia
+    return rpm
 
 def make_first_order_system(K, tau):
     """Return TransferFunction G(s) = K/(tau*s + 1)."""

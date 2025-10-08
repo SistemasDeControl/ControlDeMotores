@@ -254,6 +254,25 @@ class MotorMaloParametricTestGUI(QtWidgets.QMainWindow):
             f"Resultados guardados en:\n{csv_path}\n{png_path}"
         )
 
+def run_perturbation_test():
+    K = BASE_K
+    tau = BASE_TAU
+    Ts = TIME_VECTOR[1] - TIME_VECTOR[0]
+    ref = TARGET_RPM
+    rpm = 0
+    rpm_hist = []
+    error_hist = []
+    for i, t in enumerate(TIME_VECTOR):
+        # Falla simulada entre 3 y 5 segundos
+        falla = 3 < t < 5
+        ruido_std = 5.0 if not falla else 20.0
+        rpm = motor_malo_step(rpm, ref, K, tau, Ts, ruido_std=ruido_std, falla=falla)
+        rpm_hist.append(rpm)
+        error_hist.append(ref - rpm)
+    mse = np.mean(np.square(error_hist))
+    print(f"Error cuadrático medio bajo perturbaciones: {mse:.2f}")
+    return rpm_hist, error_hist
+
 
 # ======= MAIN =======
 if __name__ == "__main__":
