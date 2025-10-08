@@ -9,6 +9,7 @@ import random
 import time
 from matplotlib.offsetbox import OffsetImage, AnnotationBbox
 from PIL import Image, ImageSequence
+from pid_controller import PIDController
 
 # ==========================================================
 # ==========   GIF DEL MOTOR (COMPARTIDO)   ================
