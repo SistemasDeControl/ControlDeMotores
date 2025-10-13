@@ -50,10 +50,55 @@ class MotorBueno:
 # ==========================================================
 # ===============   MOTOR MALO (Aleatorio)   ===============
 # ==========================================================
-def generate_malo_rpm_and_u():
-    u = 1.0 if random.random() < 0.7 else 0.0
-    rpm = random.randint(8000, int(YMAX_DATA)) if u == 1.0 else random.randint(0, 1500)
-    return rpm, u
+# Se elimina la función generate_malo_rpm_and_u() porque el PID la reemplazará
+
+# ==========================================================
+# ===============   PID CONTROLLER (Nuevo)   ===============
+# ==========================================================
+class PIDController:
+    def __init__(self, Kp, Ki, Kd, output_min=None, output_max=None, integral_limit=None):
+        self.Kp = Kp
+        self.Ki = Ki
+        self.Kd = Kd
+
+        self.integral = 0.0
+        self.last_error = 0.0
+        
+        self.output_min = output_min
+        self.output_max = output_max
+        
+        self.integral_limit = integral_limit 
+
+    def calculate(self, setpoint, process_variable, dt):
+        error = setpoint - process_variable
+
+        P_term = self.Kp * error
+        
+        self.integral += error * dt
+        
+        if self.integral_limit is not None:
+             self.integral = max(min(self.integral, self.integral_limit), -self.integral_limit)
+
+        I_term = self.Ki * self.integral
+
+        D_term = 0.0
+        if dt > 0:
+            D_term = self.Kd * ((error - self.last_error) / dt)
+        
+        self.last_error = error
+
+        control_output = P_term + I_term + D_term
+
+        if self.output_min is not None and control_output < self.output_min:
+            control_output = self.output_min
+        if self.output_max is not None and control_output > self.output_max:
+            control_output = self.output_max
+            
+        return control_output
+
+    def reset(self):
+        self.integral = 0.0
+        self.last_error = 0.0
 
 # ==========================================================
 # ===============   Botón redondeado Canvas   ==============
@@ -81,7 +126,8 @@ class RoundedButton(tk.Canvas):
         self.border = border
         self.shadow = shadow
         self.font = font
-        self.state_active = False
+        self.state_active = False # Usado para el estado presionado
+        self.state_toggle = False # Usado para el botón PID Activo
 
         self.configure(cursor="hand2")
 
@@ -93,18 +139,13 @@ class RoundedButton(tk.Canvas):
         # Texto
         self.text_id   = self.create_text(w//2, h//2, text=text, fill=self.fg, font=self.font)
 
-        # Eventos
+        # Eventos (SOLO A LOS ELEMENTOS INTERNOS, NO AL CANVAS COMPLETO)
         for tag in (self.shadow_id, self.body_id, self.text_id):
             self.tag_bind(tag, "<Enter>", self._on_enter)
             self.tag_bind(tag, "<Leave>", self._on_leave)
             self.tag_bind(tag, "<Button-1>", self._on_press)
             self.tag_bind(tag, "<ButtonRelease-1>", self._on_release)
 
-        # También sobre el canvas
-        self.bind("<Enter>", self._on_enter)
-        self.bind("<Leave>", self._on_leave)
-        self.bind("<Button-1>", self._on_press)
-        self.bind("<ButtonRelease-1>", self._on_release)
 
     def _round_rect(self, x1, y1, x2, y2, r, **kwargs):
         """
@@ -128,11 +169,11 @@ class RoundedButton(tk.Canvas):
         return self.create_polygon(points, smooth=True, splinesteps=36, **kwargs)
 
     def _on_enter(self, _):
-        if not self.state_active:
+        if not self.state_active and not self.state_toggle: # Nuevo: No cambiar si está toggleado
             self.itemconfig(self.body_id, fill=self.hover_fill)
 
     def _on_leave(self, _):
-        if not self.state_active:
+        if not self.state_active and not self.state_toggle: # Nuevo: No cambiar si está toggleado
             self.itemconfig(self.body_id, fill=self.fill)
 
     def _on_press(self, _):
@@ -141,9 +182,24 @@ class RoundedButton(tk.Canvas):
 
     def _on_release(self, _):
         self.state_active = False
-        self.itemconfig(self.body_id, fill=self.hover_fill)
+        if not self.state_toggle: # Nuevo: Si no es un botón de toggle, vuelve al hover
+             self.itemconfig(self.body_id, fill=self.hover_fill)
+        else: # Si es un botón de toggle, mantiene el color activo
+            self.itemconfig(self.body_id, fill=self.active_fill)
+
         if callable(self.command):
             self.command()
+
+    # Nuevo: Método para establecer el estado de toggle
+    def set_toggle_state(self, is_toggled):
+        self.state_toggle = is_toggled
+        if is_toggled:
+            self.itemconfig(self.body_id, fill=self.active_fill, outline="#2563eb") # Un color distintivo para PID activo
+            self.itemconfig(self.text_id, fill="#ffffff") # Texto blanco para contraste
+        else:
+            self.itemconfig(self.body_id, fill=self.fill, outline=self.border)
+            self.itemconfig(self.text_id, fill=self.fg)
+
 
 # ==========================================================
 # ===============   APP TKINTER + MATPLOTLIB   =============
@@ -151,19 +207,29 @@ class RoundedButton(tk.Canvas):
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title("Motores — 15k RPM + pista estética y autos vectoriales (Start/Pause/Reset)")
+        self.title("Motores — 15k RPM + pista estética y autos vectoriales (Start/Pause/Reset/PID)")
         self.geometry("1200x860")
 
         # ---- Parámetros
         self.XWINDOW = 40.0
         self.UPDATE_MS = 50  # bucle con after
+        self.MOTOR_BAD_TS = 0.2 # Mismo Ts para el motor malo al usar PID
 
         # ---- Estado general
         self.running = False  # controla BUENO y MALO
+        self.pid_active_bad_motor = False # Nuevo: Estado para activar/desactivar PID en motor malo
 
         # ---- Estado MALO
         self.tiempo_malo = 0.0
         self.hist_time_malo, self.hist_rpm_malo, self.hist_u_malo = [], [], []
+        self.motor_malo_rpm = 0.0 # Nuevo: RPM actual del motor malo (cuando no es random)
+
+        # ---- PID para Motor Malo
+        # Ajusta estos valores Kp, Ki, Kd según el comportamiento deseado
+        self.pid_malo = PIDController(Kp=0.01, Ki=0.0001, Kd=0.01, 
+                                      output_min=0.0, output_max=1.0, 
+                                      integral_limit=100.0)
+        self.pid_setpoint_malo = 12000.0 # Nuevo: Setpoint para el motor malo
 
         # ---- Estado BUENO
         self.sim_bueno = MotorBueno()
@@ -211,6 +277,13 @@ class App(tk.Tk):
         RoundedButton(btns, text="▶ Iniciar",  command=self._start).grid(row=0, column=0, padx=6)
         RoundedButton(btns, text="⏸ Pausar",   command=self._pause).grid(row=0, column=1, padx=6)
         RoundedButton(btns, text="⟲ Reiniciar",command=self._reset).grid(row=0, column=2, padx=6)
+        
+        # Nuevo botón para activar/desactivar PID en el motor malo
+        self.pid_button = RoundedButton(btns, text="⚙ PID Activo", command=self._toggle_pid_bad_motor,
+                                         bg="#2563eb", fg="#ffffff", hover_bg="#1d4ed8", active_bg="#1e40af",
+                                         border="#2563eb") # Color azul para el PID
+        self.pid_button.grid(row=0, column=3, padx=6)
+
 
         # Canvas Matplotlib
         self.fig = Figure(figsize=(11.5, 8.2), dpi=100)
@@ -377,12 +450,36 @@ class App(tk.Tk):
         self.running = False
         self.sim_bueno.running = False
 
+    # ... (dentro de la clase App)
+
+    def _toggle_pid_bad_motor(self): # Método para el botón PID
+        self.pid_active_bad_motor = not self.pid_active_bad_motor
+        self.pid_button.set_toggle_state(self.pid_active_bad_motor)
+        if self.pid_active_bad_motor:
+            # Color verde para "ACTIVADO"
+            print("\033[92mPID para Motor Malo ACTIVADO.\033[0m") 
+            self.pid_malo.reset() # Reiniciar el PID para evitar saltos bruscos al activarlo
+            self.motor_malo_rpm = 0.0 # Aseguramos un inicio limpio para el motor malo
+        else:
+            # Color rojo para "DESACTIVADO"
+            print("\033[91mPID para Motor Malo DESACTIVADO. Vuelve a modo aleatorio.\033[0m")
+            self.motor_malo_rpm = 0.0
+
+
     def _reset(self, *_):
         self.running = False
         self.sim_bueno.reset()
+        
         # Malo
         self.tiempo_malo = 0.0
         self.hist_time_malo.clear(); self.hist_rpm_malo.clear(); self.hist_u_malo.clear()
+        self.motor_malo_rpm = 0.0 # Restablecer RPM del motor malo
+        self.pid_malo.reset() # Reiniciar PID
+        # Si el PID estaba activo, lo desactivamos y actualizamos el botón
+        if self.pid_active_bad_motor:
+            self.pid_active_bad_motor = False
+            self.pid_button.set_toggle_state(False)
+
         # Pista
         self.track_good_x = 0.07
         self.track_bad_x  = 0.07
@@ -402,12 +499,35 @@ class App(tk.Tk):
     def _tick(self):
         if self.running:
             # ---- MALO ----
-            rpm_m, u_m = generate_malo_rpm_and_u()
-            self.tiempo_malo += 0.2
-            t_now = time.time()
+            current_time = time.time()
             if not self.hist_time_malo:
-                self._t0_malo = t_now
-            self.hist_time_malo.append(t_now)
+                self._t0_malo = current_time # Inicializa _t0_malo si está vacío
+            
+            # Calcular dt para PID
+            dt = self.MOTOR_BAD_TS 
+
+            if self.pid_active_bad_motor:
+                # Usar PID para controlar el motor malo
+                # La "entrada" u al motor es la salida del PID
+                u_pid = self.pid_malo.calculate(setpoint=self.pid_setpoint_malo, 
+                                                process_variable=self.motor_malo_rpm, 
+                                                dt=dt)
+                
+                # Simular el motor malo como un motor de primer orden (similar al bueno)
+                # K y tau deben ser ajustados para el motor malo, aquí asumimos unos valores
+                K_malo_pid = 15000.0 # K máximo que puede alcanzar
+                tau_malo_pid = 1.2 # Constante de tiempo, más lenta que el bueno
+                self.motor_malo_rpm = motor_step(self.motor_malo_rpm, u_pid, 
+                                                 K_malo_pid, tau_malo_pid, dt)
+                rpm_m = min(self.motor_malo_rpm, YMAX_DATA)
+                u_m = u_pid # La entrada es la salida del PID
+            else:
+                # Comportamiento aleatorio original
+                u_m = 1.0 if random.random() < 0.7 else 0.0
+                rpm_m = random.randint(8000, int(YMAX_DATA)) if u_m == 1.0 else random.randint(0, 1500)
+            
+            self.tiempo_malo += dt
+            self.hist_time_malo.append(current_time)
             self.hist_rpm_malo.append(min(rpm_m, YMAX_DATA))
             self.hist_u_malo.append(u_m)
 
@@ -423,9 +543,20 @@ class App(tk.Tk):
             last_t_m = times_rel_malo[-1] if times_rel_malo else 0
             last_u_m = self.hist_u_malo[-1] if self.hist_u_malo else 0.0
             last_rpm_m = self.hist_rpm_malo[-1] if self.hist_rpm_malo else 0.0
-            vals_m = [last_t_m, last_u_m, last_rpm_m,
-                      random.uniform(5,20), random.uniform(0.5,2),
-                      random.uniform(2,6),  random.uniform(0,0.2)]
+            
+            # Para los valores de tabla, si el PID está activo, podrían mostrarse valores más realistas
+            # o los mismos que antes si no se calculan sobreimpulso/asentamiento para el modo PID.
+            # Aquí, para simplificar, se mantienen los valores aleatorios para las métricas que no son tiempo, u o rpm.
+            if self.pid_active_bad_motor:
+                 vals_m = [last_t_m, last_u_m, last_rpm_m,
+                          0.00, 0.00, # Sobreimpulso y tiempo subida (no calculados fácilmente aquí)
+                          abs(self.pid_setpoint_malo - last_rpm_m) / self.pid_setpoint_malo if self.pid_setpoint_malo else 0.0 # Error estacionario
+                          ]
+            else:
+                vals_m = [last_t_m, last_u_m, last_rpm_m,
+                          random.uniform(5,20), random.uniform(0.5,2),
+                          random.uniform(2,6),  random.uniform(0,0.2)]
+
             for i, v in enumerate(vals_m):
                 self.table_malo._cells[(i+1,1)].get_text().set_text(f"{v:.2f}")
 
@@ -465,7 +596,7 @@ class App(tk.Tk):
                 self.track_good_x = 0.06 + ((self.track_good_x - 0.06 + v_good) % 0.88)
 
         # --------- siempre reubica autos y ajusta ejes ----------
-        rpm_bad_now = self.hist_rpm_malo[-1] if self.hist_rpm_malo else 0.0
+        rpm_bad_now = self.motor_malo_rpm if self.pid_active_bad_motor else (self.hist_rpm_malo[-1] if self.hist_rpm_malo else 0.0)
         rpm_good_now = self.sim_bueno.rpm if hasattr(self.sim_bueno, "rpm") else 0.0
         self._track_move("good", self.track_good_x, rpm_good_now)
         self._track_move("bad",  self.track_bad_x,  rpm_bad_now)
