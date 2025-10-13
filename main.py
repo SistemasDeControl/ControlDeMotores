@@ -145,6 +145,7 @@ class RoundedButton(tk.Canvas):
         if callable(self.command):
             self.command()
 
+# ... (Configuración de Motor Bueno sin cambios) ...
 # ==========================================================
 # ===============   APP TKINTER + MATPLOTLIB   =============
 # ==========================================================
