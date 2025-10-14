@@ -8,11 +8,12 @@ import random
 import time
 import tkinter as tk
 from tkinter import ttk
+from motor_malo_model import MotorMalo, YMAX_DATA
+
 
 # ==========================================================
 # ===============   MOTOR BUENO (Modelo)   =================
 # ==========================================================
-YMAX_DATA  = 15000.0   # tope físico de los motores
 GRAPH_YMAX = 20000.0   # tope del eje para mostrar hasta 20k
 
 def motor_step(rpm_prev, u, K, tau, Ts):
@@ -222,13 +223,19 @@ class App(tk.Tk):
         # ---- Estado MALO
         self.tiempo_malo = 0.0
         self.hist_time_malo, self.hist_rpm_malo, self.hist_u_malo = [], [], []
-        self.motor_malo_rpm = 0.0 # Nuevo: RPM actual del motor malo (cuando no es random)
+        self.motor_malo = MotorMalo(K=15000.0, tau=1.2, Ts=self.MOTOR_BAD_TS)
 
         # ---- PID para Motor Malo
-        # Ajusta estos valores Kp, Ki, Kd según el comportamiento deseado
-        self.pid_malo = PIDController(Kp=0.01, Ki=0.0001, Kd=0.01, 
-                                      output_min=0.0, output_max=1.0, 
-                                      integral_limit=100.0)
+        # Valores ajustados para las nuevas perturbaciones
+        self.pid_malo = PIDController(
+            Kp=0.0008,   # proporcional
+            Ki=0.0001,   # integral
+            Kd=0.0001,   # derivativo
+            output_min=0.0,
+            output_max=1.0,
+            integral_limit=10.0
+        )
+
         self.pid_setpoint_malo = 12000.0 # Nuevo: Setpoint para el motor malo
 
         # ---- Estado BUENO
@@ -452,18 +459,19 @@ class App(tk.Tk):
 
     # ... (dentro de la clase App)
 
-    def _toggle_pid_bad_motor(self): # Método para el botón PID
+    def _toggle_pid_bad_motor(self):
         self.pid_active_bad_motor = not self.pid_active_bad_motor
         self.pid_button.set_toggle_state(self.pid_active_bad_motor)
+        
+        # Solo resetear PID, no el motor ni el histórico
+        self.pid_malo.reset()
+        
         if self.pid_active_bad_motor:
-            # Color verde para "ACTIVADO"
-            print("\033[92mPID para Motor Malo ACTIVADO.\033[0m") 
-            self.pid_malo.reset() # Reiniciar el PID para evitar saltos bruscos al activarlo
-            self.motor_malo_rpm = 0.0 # Aseguramos un inicio limpio para el motor malo
+            print("\033[92mPID para Motor Malo ACTIVADO.\033[0m")
         else:
-            # Color rojo para "DESACTIVADO"
             print("\033[91mPID para Motor Malo DESACTIVADO. Vuelve a modo aleatorio.\033[0m")
-            self.motor_malo_rpm = 0.0
+
+
 
 
     def _reset(self, *_):
@@ -473,8 +481,9 @@ class App(tk.Tk):
         # Malo
         self.tiempo_malo = 0.0
         self.hist_time_malo.clear(); self.hist_rpm_malo.clear(); self.hist_u_malo.clear()
-        self.motor_malo_rpm = 0.0 # Restablecer RPM del motor malo
-        self.pid_malo.reset() # Reiniciar PID
+        self.motor_malo.reset()  # Usar reset() completo del motor
+        self.pid_malo.reset()
+        self._last_tick_malo = time.time()  # Resetear el tiempo de último tick
         # Si el PID estaba activo, lo desactivamos y actualizamos el botón
         if self.pid_active_bad_motor:
             self.pid_active_bad_motor = False
@@ -501,35 +510,30 @@ class App(tk.Tk):
             # ---- MALO ----
             current_time = time.time()
             if not self.hist_time_malo:
-                self._t0_malo = current_time # Inicializa _t0_malo si está vacío
+                self._t0_malo = current_time
+                self._last_tick_malo = current_time
             
-            # Calcular dt para PID
-            dt = self.MOTOR_BAD_TS 
+            # Calcular dt REAL basado en tiempo transcurrido
+            dt = current_time - self._last_tick_malo
+            self._last_tick_malo = current_time
+            
+            # Asegurar dt mínimo para evitar divisiones por cero
+            if dt < 0.001:
+                dt = self.MOTOR_BAD_TS
 
             if self.pid_active_bad_motor:
-                # Usar PID para controlar el motor malo
-                # La "entrada" u al motor es la salida del PID
                 u_pid = self.pid_malo.calculate(setpoint=self.pid_setpoint_malo, 
-                                                process_variable=self.motor_malo_rpm, 
+                                                process_variable=self.motor_malo.rpm, 
                                                 dt=dt)
-                
-                # Simular el motor malo como un motor de primer orden (similar al bueno)
-                # K y tau deben ser ajustados para el motor malo, aquí asumimos unos valores
-                K_malo_pid = 15000.0 # K máximo que puede alcanzar
-                tau_malo_pid = 1.2 # Constante de tiempo, más lenta que el bueno
-                self.motor_malo_rpm = motor_step(self.motor_malo_rpm, u_pid, 
-                                                 K_malo_pid, tau_malo_pid, dt)
-                rpm_m = min(self.motor_malo_rpm, YMAX_DATA)
-                u_m = u_pid # La entrada es la salida del PID
+                rpm_m = self.motor_malo.step_pid(u_pid)
+                u_m = u_pid
             else:
-                # Comportamiento aleatorio original
-                u_m = 1.0 if random.random() < 0.7 else 0.0
-                rpm_m = random.randint(8000, int(YMAX_DATA)) if u_m == 1.0 else random.randint(0, 1500)
-            
-            self.tiempo_malo += dt
-            self.hist_time_malo.append(current_time)
+                rpm_m, u_m = self.motor_malo.step_aleatorio()
+                
             self.hist_rpm_malo.append(min(rpm_m, YMAX_DATA))
             self.hist_u_malo.append(u_m)
+            self.hist_time_malo.append(current_time)
+
 
             # ventana 40s
             while len(self.hist_time_malo) > 0 and (self.hist_time_malo[-1] - self.hist_time_malo[0]) > self.XWINDOW:
@@ -537,7 +541,8 @@ class App(tk.Tk):
 
             times_rel_malo = [tt - self.hist_time_malo[0] for tt in self.hist_time_malo]
             self.line_rpm_malo.set_data(times_rel_malo, self.hist_rpm_malo)
-            self.line_u_malo.set_data(times_rel_malo, [uu * GRAPH_YMAX for uu in self.hist_u_malo])
+            self.line_u_malo.set_data(times_rel_malo, [uu * 15000 for uu in self.hist_u_malo])
+
 
             # tabla MALO
             last_t_m = times_rel_malo[-1] if times_rel_malo else 0
@@ -596,7 +601,7 @@ class App(tk.Tk):
                 self.track_good_x = 0.06 + ((self.track_good_x - 0.06 + v_good) % 0.88)
 
         # --------- siempre reubica autos y ajusta ejes ----------
-        rpm_bad_now = self.motor_malo_rpm if self.pid_active_bad_motor else (self.hist_rpm_malo[-1] if self.hist_rpm_malo else 0.0)
+        rpm_bad_now = self.hist_rpm_malo[-1] if self.hist_rpm_malo else 0.0
         rpm_good_now = self.sim_bueno.rpm if hasattr(self.sim_bueno, "rpm") else 0.0
         self._track_move("good", self.track_good_x, rpm_good_now)
         self._track_move("bad",  self.track_bad_x,  rpm_bad_now)
