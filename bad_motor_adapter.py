@@ -88,3 +88,4 @@ class BadMotorAdapter:
 
         # Perturbación total (media ~0)
         return self._u_noise + self._u_step
+#MOTRO MALO PID 15000 RPM
