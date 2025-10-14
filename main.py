@@ -10,6 +10,8 @@ import tkinter as tk
 from tkinter import ttk
 from motor_malo_model import MotorMalo, YMAX_DATA
 
+from bad_motor_adapter import BadMotorAdapter, BadMotorConfig
+
 
 # ==========================================================
 # ===============   MOTOR BUENO (Modelo)   =================
@@ -223,20 +225,39 @@ class App(tk.Tk):
         # ---- Estado MALO
         self.tiempo_malo = 0.0
         self.hist_time_malo, self.hist_rpm_malo, self.hist_u_malo = [], [], []
-        self.motor_malo = MotorMalo(K=15000.0, tau=1.2, Ts=self.MOTOR_BAD_TS)
+        
+        # Motor “real” (sin tocar tu implementación)
+        self.motor_malo_raw = MotorMalo(K=15000.0, tau=1.2, Ts=self.MOTOR_BAD_TS)
+        self.motor_malo = BadMotorAdapter(
+            self.motor_malo_raw,
+            BadMotorConfig(
+                open_loop_rpm=10000.0,
+                k_motor=self.motor_malo_raw.K,
+                Ts=self.MOTOR_BAD_TS,
+                noise_amp_u=0.05,
+                noise_bandwidth_hz=0.35,
+                step_prob=0.06,
+                step_u=0.12,
+                step_tau_s=2.0
+            )
+        )
+
+
+
+
 
         # ---- PID para Motor Malo
         # Valores ajustados para las nuevas perturbaciones
         self.pid_malo = PIDController(
-            Kp=0.0008,   # proporcional
-            Ki=0.0001,   # integral
-            Kd=0.0001,   # derivativo
+            Kp=0.0012,   # proporcional
+            Ki=0.00035,   # integral
+            Kd=0.00008,   # derivativo
             output_min=0.0,
             output_max=1.0,
-            integral_limit=10.0
+            integral_limit=12.0
         )
 
-        self.pid_setpoint_malo = 12000.0 # Nuevo: Setpoint para el motor malo
+        self.pid_setpoint_malo = 15000.0 # Nuevo: Setpoint para el motor malo
 
         # ---- Estado BUENO
         self.sim_bueno = MotorBueno()
@@ -462,7 +483,10 @@ class App(tk.Tk):
     def _toggle_pid_bad_motor(self):
         self.pid_active_bad_motor = not self.pid_active_bad_motor
         self.pid_button.set_toggle_state(self.pid_active_bad_motor)
-        
+        self.pid_malo.reset()  # limpia integrador/derivada
+        print("\033[92mPID para Motor Malo ACTIVADO.\033[0m" if self.pid_active_bad_motor
+            else "\033[91mPID para Motor Malo DESACTIVADO. Vuelve a modo aleatorio.\033[0m")
+
         # Solo resetear PID, no el motor ni el histórico
         self.pid_malo.reset()
         
@@ -508,68 +532,76 @@ class App(tk.Tk):
     def _tick(self):
         if self.running:
             # ---- MALO ----
-            current_time = time.time()
+            current_time = time.perf_counter()
             if not self.hist_time_malo:
-                self._t0_malo = current_time
                 self._last_tick_malo = current_time
-            
-            # Calcular dt REAL basado en tiempo transcurrido
+                
+            # dt con suavizado para estabilizar la D del PID
             dt = current_time - self._last_tick_malo
             self._last_tick_malo = current_time
-            
-            # Asegurar dt mínimo para evitar divisiones por cero
-            if dt < 0.001:
-                dt = self.MOTOR_BAD_TS
+            dt = max(0.5 * self.MOTOR_BAD_TS, min(2.0 * self.MOTOR_BAD_TS, dt))
 
             if self.pid_active_bad_motor:
-                u_pid = self.pid_malo.calculate(setpoint=self.pid_setpoint_malo, 
-                                                process_variable=self.motor_malo.rpm, 
-                                                dt=dt)
-                rpm_m = self.motor_malo.step_pid(u_pid)
-                u_m = u_pid
+                # PID EN LAZO: usa la RPM real del motor malo (expuesta por el adaptador)
+                u_pid = self.pid_malo.calculate(
+                    setpoint=self.pid_setpoint_malo,     # 15000.0
+                    process_variable=self.motor_malo.rpm,
+                    dt=dt
+                )
+                rpm_m = self.motor_malo.step_pid(u_pid)   # aplica u_pid + perturbaciones
+                u_m   = self.motor_malo.last_u_eff        # u efectiva realmente aplicada
             else:
+                # ABIERTO: perturbaciones + tope u_max_open => ~10000 RPM sin rebasar
                 rpm_m, u_m = self.motor_malo.step_aleatorio()
-                
+
+            # registrar histórico del “malo”
             self.hist_rpm_malo.append(min(rpm_m, YMAX_DATA))
             self.hist_u_malo.append(u_m)
             self.hist_time_malo.append(current_time)
 
-
-            # ventana 40s
+            # mantener ventana de XWINDOW segundos
             while len(self.hist_time_malo) > 0 and (self.hist_time_malo[-1] - self.hist_time_malo[0]) > self.XWINDOW:
                 self.hist_time_malo.pop(0); self.hist_rpm_malo.pop(0); self.hist_u_malo.pop(0)
 
+            # ejes/series “malo”
             times_rel_malo = [tt - self.hist_time_malo[0] for tt in self.hist_time_malo]
             self.line_rpm_malo.set_data(times_rel_malo, self.hist_rpm_malo)
-            self.line_u_malo.set_data(times_rel_malo, [uu * 15000 for uu in self.hist_u_malo])
+            self.line_u_malo.set_data(times_rel_malo, [uu * YMAX_DATA for uu in self.hist_u_malo])
 
-
-            # tabla MALO
-            last_t_m = times_rel_malo[-1] if times_rel_malo else 0
-            last_u_m = self.hist_u_malo[-1] if self.hist_u_malo else 0.0
+            # tabla “malo”
+            last_t_m   = times_rel_malo[-1] if times_rel_malo else 0.0
+            last_u_m   = self.hist_u_malo[-1] if self.hist_u_malo else 0.0
             last_rpm_m = self.hist_rpm_malo[-1] if self.hist_rpm_malo else 0.0
-            
-            # Para los valores de tabla, si el PID está activo, podrían mostrarse valores más realistas
-            # o los mismos que antes si no se calculan sobreimpulso/asentamiento para el modo PID.
-            # Aquí, para simplificar, se mantienen los valores aleatorios para las métricas que no son tiempo, u o rpm.
+
             if self.pid_active_bad_motor:
-                 vals_m = [last_t_m, last_u_m, last_rpm_m,
-                          0.00, 0.00, # Sobreimpulso y tiempo subida (no calculados fácilmente aquí)
-                          abs(self.pid_setpoint_malo - last_rpm_m) / self.pid_setpoint_malo if self.pid_setpoint_malo else 0.0 # Error estacionario
-                          ]
+                vals_m = [
+                    last_t_m,                     # Tiempo (s)
+                    last_u_m,                     # Entrada (u)
+                    last_rpm_m,                   # RPM actuales
+                    0.00,                         # Sobreimpulso (%)
+                    0.00,                         # Tiempo subida (s)
+                    0.00,                         # Tiempo asentamiento (s)
+                    (abs(self.pid_setpoint_malo - last_rpm_m) / self.pid_setpoint_malo) if self.pid_setpoint_malo else 0.0
+                ]
             else:
-                vals_m = [last_t_m, last_u_m, last_rpm_m,
-                          random.uniform(5,20), random.uniform(0.5,2),
-                          random.uniform(2,6),  random.uniform(0,0.2)]
+                vals_m = [
+                    last_t_m,
+                    last_u_m,
+                    last_rpm_m,
+                    random.uniform(5,20),
+                    random.uniform(0.5,2),
+                    random.uniform(2,6),
+                    random.uniform(0,0.2)
+                ]
 
             for i, v in enumerate(vals_m):
                 self.table_malo._cells[(i+1,1)].get_text().set_text(f"{v:.2f}")
 
-            # avance auto MALO
+            # avance auto “malo”
             v_bad = (last_rpm_m / YMAX_DATA) * self.track_speed_scale
             self.track_bad_x = 0.06 + ((self.track_bad_x - 0.06 + v_bad) % 0.88)
 
-            # ---- BUENO ----
+        # ---- BUENO ----
             self.sim_bueno.step()
             if self.sim_bueno.rpm_history:
                 self.sim_bueno.rpm_history[-1] = min(self.sim_bueno.rpm_history[-1], YMAX_DATA)
