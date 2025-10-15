@@ -9,6 +9,8 @@ import time
 import tkinter as tk
 from tkinter import ttk
 from motor_malo_model import MotorMalo, YMAX_DATA
+from Generar_reportes import generar_reporte_pdf
+
 
 from bad_motor_adapter import BadMotorAdapter, BadMotorConfig
 
@@ -212,6 +214,7 @@ class App(tk.Tk):
         super().__init__()
         self.title("Motores — 15k RPM + pista estética y autos vectoriales (Start/Pause/Reset/PID)")
         self.geometry("1200x860")
+        
 
         # ---- Parámetros
         self.XWINDOW = 40.0
@@ -290,6 +293,20 @@ class App(tk.Tk):
             pass
         style.configure("Title.TLabel", font=("Segoe UI", 12, "bold"))
 
+    def _generar_reporte_pdf(self):
+      """Genera el PDF usando los históricos actuales. Maneja errores sin alterar el resto del app."""
+      try:
+          generar_reporte_pdf(
+            self.hist_time_malo, self.hist_rpm_malo, self.hist_u_malo,
+            self.sim_bueno.time, self.sim_bueno.rpm_history, self.sim_bueno.u_history
+        )
+          print("\033[94m✅ Reporte PDF generado correctamente.\033[0m")
+      except Exception as e:
+        # Esto evita que un fallo en la generación del PDF bloquee la app
+          print("\033[91m❌ Error al generar el reporte:\033[0m", e)
+
+
+
     # ---------------- UI ----------------
     def _build_ui(self):
         # NAV blanco
@@ -305,7 +322,8 @@ class App(tk.Tk):
         RoundedButton(btns, text="▶ Iniciar",  command=self._start).grid(row=0, column=0, padx=6)
         RoundedButton(btns, text="⏸ Pausar",   command=self._pause).grid(row=0, column=1, padx=6)
         RoundedButton(btns, text="⟲ Reiniciar",command=self._reset).grid(row=0, column=2, padx=6)
-        
+        RoundedButton(btns, text="📊 Generar reporte PDF", command=self._generar_reporte_pdf).grid(row=0, column=4, padx=6)
+
         # Nuevo botón para activar/desactivar PID en el motor malo
         self.pid_button = RoundedButton(btns, text="⚙ PID Activo", command=self._toggle_pid_bad_motor,
                                          bg="#2563eb", fg="#ffffff", hover_bg="#1d4ed8", active_bg="#1e40af",
